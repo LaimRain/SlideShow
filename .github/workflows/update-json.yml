@@ -15,25 +15,24 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up ExifTool and jq
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y exiftool jq
-
       - name: Rename Images and Generate Split JSONs
         run: |
           mkdir -p json
 
-          # images/ の中にあるサブフォルダ（secret/, select/ など）だけを対象にする
+          # images/ の中にあるサブフォルダをループ
           for dir in images/*/; do
             if [ -d "$dir" ]; then
               folder_name=$(basename "$dir")
               echo "Processing folder: $folder_name"
 
               mkdir -p "${dir}processed"
+              counter=1
 
-              for img in "${dir}"*; do
-                if [ -d "$img" ] || [[ "$img" == *.json ]] || [[ "$img" == .* ]]; then
+              # フォルダ内の画像を処理（ファイル名の昇順でソートして処理すると綺麗な連番になります）
+              for img in $(ls -1 "${dir}" | sort); do
+                img_path="${dir}${img}"
+
+                if [ -d "$img_path" ] || [[ "$img" == *.json ]] || [[ "$img" == .* ]]; then
                   continue
                 fi
 
@@ -41,30 +40,32 @@ jobs:
                 ext_lower=$(echo "$ext" | tr '[:upper:]' '[:lower:]')
 
                 if [[ "$ext_lower" == "jpg" || "$ext_lower" == "jpeg" || "$ext_lower" == "png" || "$ext_lower" == "webp" ]]; then
-                  datetime=$(exiftool -s -s -s -DateTimeOriginal "$img")
-                  if [ -z "$datetime" ]; then
-                    datetime=$(date -r "$img" "+%Y:%m:%d %H:%M:%S")
+                  
+                  # VRChatのファイル名 (VRChat_YYYY-MM-DD_...) から日付部分 (YYYY-MM-DD) を抽出
+                  if [[ "$img" =~ VRChat_([0-9]{4}-[0-9]{2}-[0-9]{2}) ]]; then
+                    date_part="${BASH_REMATCH[1]}"
+                  else
+                    # 万が一VRChat以外のファイル名だった場合はファイルの更新日を使用
+                    date_part=$(date -r "$img_path" "+%Y-%m-%d")
                   fi
 
-                  filename_base=$(echo "$datetime" | sed 's/:/-/g' | sed 's/ /_/' | sed 's/:/-/g')
-                  if [ -z "$filename_base" ] || [ "$filename_base" = "__" ]; then
-                    filename_base=$(date "+%Y-%m-%d_%H-%M-%S")
-                  fi
+                  # 3桁の通し番号をゼロ埋めで生成 (001, 002, 003...)
+                  printf -v seq_num "%03d" "$counter"
+                  new_name="${date_part}_${seq_num}.${ext_lower}"
 
-                  rand_suffix=$(cat /dev/urandom | tr -dc 'a-z0-9' | fold -w 4 | head -n 1)
-                  new_name="${filename_base}_${rand_suffix}.$ext_lower"
-
-                  cp "$img" "${dir}processed/$new_name"
+                  cp "$img_path" "${dir}processed/$new_name"
+                  counter=$((counter + 1))
                 fi
               done
 
+              # 元の画像を入れ替え
               rm -f "${dir}"*.*
               if [ "$(ls -A "${dir}processed")" ]; then
                 mv "${dir}processed/"* "${dir}"
               fi
               rmdir "${dir}processed"
 
-              # 生成されるJSONファイル名を images/secret_list.json ではなく secret_list.json のようにすっきりさせる
+              # リスト用JSONの生成
               find "$dir" -maxdepth 1 -type f \( -name "*.jpg" -o -name "*.jpeg" -o -name "*.png" -o -name "*.webp" \) -printf "images/$folder_name/%P\n" | sort | jq -R -s 'split("\n")[:-1]' > "json/${folder_name}_list.json"
               
               echo "Generated: json/${folder_name}_list.json"
@@ -74,5 +75,5 @@ jobs:
       - name: Commit and push changes
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "Auto-rename images and update JSON lists"
+          commit_message: "Auto-rename images with continuous numbers and update JSON lists"
           file_pattern: "images/** json/**"
