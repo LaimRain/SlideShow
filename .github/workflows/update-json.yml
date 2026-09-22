@@ -2,9 +2,8 @@ name: Update Split JSONs for Folders
 
 on:
   push:
-    paths:
-      - '**'
-      - '!json/**'  # json/ フォルダ自身の変更では無限ループしないように除外
+    branches:
+      - main  # もしリポジトリのメインブランチが master の場合は master に変更してください
 
 permissions:
   contents: write
@@ -23,13 +22,9 @@ jobs:
 
       - name: Rename Images and Generate Split JSONs
         run: |
-          # 1. JSONまとめ用ディレクトリを確実に作成
           mkdir -p json
 
-          # 2. ルート直下のすべてのディレクトリをループ処理
-          # (secret/ や select/ などのフォルダを自動で対象にします)
           for dir in */; do
-            # 除外するディレクトリ（.github や json など）をスキップ
             if [[ "$dir" == ".github/" || "$dir" == "json/" ]]; then
               continue
             fi
@@ -37,12 +32,9 @@ jobs:
             folder_name=$(basename "$dir")
             echo "Processing folder: $folder_name"
 
-            # 処理用の一時フォルダ
             mkdir -p "${dir}processed"
 
-            # フォルダ内の画像をリネーム
             for img in "${dir}"*; do
-              # ディレクトリや隠しファイル、ダミーファイル(.dammy, .gitkeepなど)はスキップ
               if [ -d "$img" ] || [[ "$img" == *.json ]] || [[ "$img" == .* ]]; then
                 continue
               fi
@@ -51,7 +43,6 @@ jobs:
               ext_lower=$(echo "$ext" | tr '[:upper:]' '[:lower:]')
 
               if [[ "$ext_lower" == "jpg" || "$ext_lower" == "jpeg" || "$ext_lower" == "png" || "$ext_lower" == "webp" ]]; then
-                # 撮影日を取得 (Exif)
                 datetime=$(exiftool -s -s -s -DateTimeOriginal "$img")
                 if [ -z "$datetime" ]; then
                   datetime=$(date -r "$img" "+%Y:%m:%d %H:%M:%S")
@@ -69,14 +60,12 @@ jobs:
               fi
             done
 
-            # 元の画像を入れ替え（ダミーファイル等は残しつつ画像だけ更新）
             rm -f "${dir}"*.*
             if [ "$(ls -A "${dir}processed")" ]; then
               mv "${dir}processed/"* "${dir}"
             fi
             rmdir "${dir}processed"
 
-            # 3. [フォルダ名]_list.json を json/ フォルダの直下に生成
             find "$dir" -maxdepth 1 -type f \( -name "*.jpg" -o -name "*.jpeg" -o -name "*.png" -o -name "*.webp" \) -printf "$folder_name/%P\n" | sort | jq -R -s 'split("\n")[:-1]' > "json/${folder_name}_list.json"
             
             echo "Generated: json/${folder_name}_list.json"
