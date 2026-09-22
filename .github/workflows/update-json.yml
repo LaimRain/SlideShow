@@ -1,1 +1,32 @@
+name: Update Image List JSON
 
+# images フォルダに新しい画像がプッシュ（アップロード等）されたときに自動で動く
+on:
+  push:
+    paths:
+      - 'images/**'
+
+permissions:
+  contents: write
+
+jobs:
+  update-json:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Generate list.json
+        run: |
+          cd images
+          # images フォルダ内のファイル（プレースホルダーや自分自身を除く）をリストアップしてJSONにする
+          # 拡張子が jpg, jpeg, png, gif, webp などのファイルを対象にする例
+          find . -type f \( -name "*.jpg" -o -name "*.jpeg" -o -name "*.png" -o -name "*.gif" -o -name "*.webp" \) | sed 's|^\./||' | sort | jq -R -s 'split("\n")[:-1]' > list.json
+          echo "Generated list.json:"
+          cat list.json
+
+      - name: Commit and push if changed
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Auto-update list.json"
+          file_pattern: "images/list.json"
