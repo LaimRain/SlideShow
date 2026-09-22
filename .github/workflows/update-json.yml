@@ -1,6 +1,5 @@
-name: Update Image List JSON
+name: Process and Update Image List
 
-# images フォルダに新しい画像がプッシュ（アップロード等）されたときに自動で動く
 on:
   push:
     paths:
@@ -10,23 +9,80 @@ permissions:
   contents: write
 
 jobs:
-  update-json:
+  process-images:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Set up ImageMagick and ExifTool
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y imagemagick exiftool jq
+
+      - name: Process, Resize, and Rename Images
+        run: |
+          cd images
+          
+          # 一時的に処理用ディレクトリを作成
+          mkdir -p processed
+          
+          # フォルダ内の画像ファイルに対して処理を実行
+          for img in *; do
+            # ディレクトリやJSON、隠しファイルはスキップ
+            if [ -d "$img" ] || [[ "$img" == *.json ]] || [[ "$img" == .* ]]; then
+              continue
+            fi
+            
+            # 拡張子の判定
+            ext="${img##*.}"
+            ext_lower=$(echo "$ext" | tr '[:upper:]' '[:lower:]')
+            
+            if [[ "$ext_lower" == "jpg" || "$ext_lower" == "jpeg" || "$ext_lower" == "png" || "$ext_lower" == "webp" ]]; then
+              # Exifから撮影日を取得 (YYYY:MM:DD HH:MM:SS 形式)
+              datetime=$(exiftool -s -s -s -DateTimeOriginal "$img")
+              
+              # Exifがない場合はファイルの更新日時を使用
+              if [ -z "$datetime" ]; then
+                datetime=$(date -r "$img" "+%Y:%m:%d %H:%M:%S")
+              fi
+              
+              # 日付文字列をファイル名用に変換 (YYYY-MM-DD_HH-MM-SS)
+              # ※コロンやスペースを置換
+              filename_base=$(echo "$datetime" | sed 's/:/-/g' | sed 's/ /_/' | sed 's/:/-/g')
+              
+              # もし万が一データが取れなかった場合のフォールバック
+              if [ -z "$filename_base" ] || [ "$filename_base" = "__" ]; then
+                filename_base=$(date "+%Y-%m-%d_%H-%M-%S")
+              fi
+              
+              # 同一秒に複数ある場合の重複防止用ランダム文字列
+              rand_suffix=$(cat /dev/urandom | tr -dc 'a-z0-9' | fold -w 4 | head -n 1)
+              new_name="${filename_base}_${rand_suffix}.jpg"
+              
+              echo "Processing: $img -> $new_name"
+              
+              # ImageMagickで圧縮・リサイズ（長辺最大2048px、画質85%に調整）してJPEGとして保存
+              convert "$img" -resize "2048x2048>" -quality 85 "processed/$new_name"
+            fi
+          done
+          
+          # 元の画像を整理して、処理済み画像を images フォルダの直下に移動
+          # （※もし元のファイルを残さず差し替えたい場合）
+          rm -f *.jpg *.jpeg *.png *.webp
+          mv processed/* .
+          rmdir processed
+
       - name: Generate list.json
         run: |
           cd images
-          # images フォルダ内のファイル（プレースホルダーや自分自身を除く）をリストアップしてJSONにする
-          # 拡張子が jpg, jpeg, png, gif, webp などのファイルを対象にする例
-          find . -type f \( -name "*.jpg" -o -name "*.jpeg" -o -name "*.png" -o -name "*.gif" -o -name "*.webp" \) | sed 's|^\./||' | sort | jq -R -s 'split("\n")[:-1]' > list.json
+          # フォルダ内の画像ファイル一覧をJSONとして出力
+          find . -maxdepth 1 -type f \( -name "*.jpg" -o -name "*.jpeg" -o -name "*.png" -o -name "*.webp" \) -printf "%P\n" | sort | jq -R -s 'split("\n")[:-1]' > list.json
           echo "Generated list.json:"
           cat list.json
 
-      - name: Commit and push if changed
+      - name: Commit and push changes
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "Auto-update list.json"
-          file_pattern: "images/list.json"
+          commit_message: "Auto-compress, rename by date, and update list.json"
+          file_pattern: "images/*"
