@@ -1,9 +1,10 @@
-name: Process and Update Image List
+name: Update Split JSONs for Folders
 
 on:
   push:
     paths:
-      - 'images/**'
+      - '**'
+      - '!json/**'  # json/ フォルダ自身の変更では無限ループしないように除外
 
 permissions:
   contents: write
@@ -15,74 +16,74 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up ImageMagick and ExifTool
+      - name: Set up ExifTool and jq
         run: |
           sudo apt-get update
-          sudo apt-get install -y imagemagick exiftool jq
+          sudo apt-get install -y exiftool jq
 
-      - name: Process, Resize, and Rename Images
+      - name: Rename Images and Generate Split JSONs
         run: |
-          cd images
-          
-          # 一時的に処理用ディレクトリを作成
-          mkdir -p processed
-          
-          # フォルダ内の画像ファイルに対して処理を実行
-          for img in *; do
-            # ディレクトリやJSON、隠しファイルはスキップ
-            if [ -d "$img" ] || [[ "$img" == *.json ]] || [[ "$img" == .* ]]; then
+          # 1. JSONまとめ用ディレクトリを確実に作成
+          mkdir -p json
+
+          # 2. ルート直下のすべてのディレクトリをループ処理
+          # (secret/ や select/ などのフォルダを自動で対象にします)
+          for dir in */; do
+            # 除外するディレクトリ（.github や json など）をスキップ
+            if [[ "$dir" == ".github/" || "$dir" == "json/" ]]; then
               continue
             fi
-            
-            # 拡張子の判定
-            ext="${img##*.}"
-            ext_lower=$(echo "$ext" | tr '[:upper:]' '[:lower:]')
-            
-            if [[ "$ext_lower" == "jpg" || "$ext_lower" == "jpeg" || "$ext_lower" == "png" || "$ext_lower" == "webp" ]]; then
-              # Exifから撮影日を取得 (YYYY:MM:DD HH:MM:SS 形式)
-              datetime=$(exiftool -s -s -s -DateTimeOriginal "$img")
-              
-              # Exifがない場合はファイルの更新日時を使用
-              if [ -z "$datetime" ]; then
-                datetime=$(date -r "$img" "+%Y:%m:%d %H:%M:%S")
-              fi
-              
-              # 日付文字列をファイル名用に変換 (YYYY-MM-DD_HH-MM-SS)
-              # ※コロンやスペースを置換
-              filename_base=$(echo "$datetime" | sed 's/:/-/g' | sed 's/ /_/' | sed 's/:/-/g')
-              
-              # もし万が一データが取れなかった場合のフォールバック
-              if [ -z "$filename_base" ] || [ "$filename_base" = "__" ]; then
-                filename_base=$(date "+%Y-%m-%d_%H-%M-%S")
-              fi
-              
-              # 同一秒に複数ある場合の重複防止用ランダム文字列
-              rand_suffix=$(cat /dev/urandom | tr -dc 'a-z0-9' | fold -w 4 | head -n 1)
-              new_name="${filename_base}_${rand_suffix}.jpg"
-              
-              echo "Processing: $img -> $new_name"
-              
-              # ImageMagickで圧縮・リサイズ（長辺最大2048px、画質85%に調整）してJPEGとして保存
-              convert "$img" -resize "2048x2048>" -quality 85 "processed/$new_name"
-            fi
-          done
-          
-          # 元の画像を整理して、処理済み画像を images フォルダの直下に移動
-          # （※もし元のファイルを残さず差し替えたい場合）
-          rm -f *.jpg *.jpeg *.png *.webp
-          mv processed/* .
-          rmdir processed
 
-      - name: Generate list.json
-        run: |
-          cd images
-          # フォルダ内の画像ファイル一覧をJSONとして出力
-          find . -maxdepth 1 -type f \( -name "*.jpg" -o -name "*.jpeg" -o -name "*.png" -o -name "*.webp" \) -printf "%P\n" | sort | jq -R -s 'split("\n")[:-1]' > list.json
-          echo "Generated list.json:"
-          cat list.json
+            folder_name=$(basename "$dir")
+            echo "Processing folder: $folder_name"
+
+            # 処理用の一時フォルダ
+            mkdir -p "${dir}processed"
+
+            # フォルダ内の画像をリネーム
+            for img in "${dir}"*; do
+              # ディレクトリや隠しファイル、ダミーファイル(.dammy, .gitkeepなど)はスキップ
+              if [ -d "$img" ] || [[ "$img" == *.json ]] || [[ "$img" == .* ]]; then
+                continue
+              fi
+
+              ext="${img##*.}"
+              ext_lower=$(echo "$ext" | tr '[:upper:]' '[:lower:]')
+
+              if [[ "$ext_lower" == "jpg" || "$ext_lower" == "jpeg" || "$ext_lower" == "png" || "$ext_lower" == "webp" ]]; then
+                # 撮影日を取得 (Exif)
+                datetime=$(exiftool -s -s -s -DateTimeOriginal "$img")
+                if [ -z "$datetime" ]; then
+                  datetime=$(date -r "$img" "+%Y:%m:%d %H:%M:%S")
+                fi
+
+                filename_base=$(echo "$datetime" | sed 's/:/-/g' | sed 's/ /_/' | sed 's/:/-/g')
+                if [ -z "$filename_base" ] || [ "$filename_base" = "__" ]; then
+                  filename_base=$(date "+%Y-%m-%d_%H-%M-%S")
+                fi
+
+                rand_suffix=$(cat /dev/urandom | tr -dc 'a-z0-9' | fold -w 4 | head -n 1)
+                new_name="${filename_base}_${rand_suffix}.$ext_lower"
+
+                cp "$img" "${dir}processed/$new_name"
+              fi
+            done
+
+            # 元の画像を入れ替え（ダミーファイル等は残しつつ画像だけ更新）
+            rm -f "${dir}"*.*
+            if [ "$(ls -A "${dir}processed")" ]; then
+              mv "${dir}processed/"* "${dir}"
+            fi
+            rmdir "${dir}processed"
+
+            # 3. [フォルダ名]_list.json を json/ フォルダの直下に生成
+            find "$dir" -maxdepth 1 -type f \( -name "*.jpg" -o -name "*.jpeg" -o -name "*.png" -o -name "*.webp" \) -printf "$folder_name/%P\n" | sort | jq -R -s 'split("\n")[:-1]' > "json/${folder_name}_list.json"
+            
+            echo "Generated: json/${folder_name}_list.json"
+          done
 
       - name: Commit and push changes
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "Auto-compress, rename by date, and update list.json"
-          file_pattern: "images/*"
+          commit_message: "Auto-rename images and update JSON lists"
+          file_pattern: "* json/*"
