@@ -1,1 +1,78 @@
+name: Update Split JSONs for Folders
 
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  process-images:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up ExifTool and jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y exiftool jq
+
+      - name: Rename Images and Generate Split JSONs
+        run: |
+          mkdir -p json
+
+          # images/ の中にあるサブフォルダ（secret/, select/ など）だけを対象にする
+          for dir in images/*/; do
+            if [ -d "$dir" ]; then
+              folder_name=$(basename "$dir")
+              echo "Processing folder: $folder_name"
+
+              mkdir -p "${dir}processed"
+
+              for img in "${dir}"*; do
+                if [ -d "$img" ] || [[ "$img" == *.json ]] || [[ "$img" == .* ]]; then
+                  continue
+                fi
+
+                ext="${img##*.}"
+                ext_lower=$(echo "$ext" | tr '[:upper:]' '[:lower:]')
+
+                if [[ "$ext_lower" == "jpg" || "$ext_lower" == "jpeg" || "$ext_lower" == "png" || "$ext_lower" == "webp" ]]; then
+                  datetime=$(exiftool -s -s -s -DateTimeOriginal "$img")
+                  if [ -z "$datetime" ]; then
+                    datetime=$(date -r "$img" "+%Y:%m:%d %H:%M:%S")
+                  fi
+
+                  filename_base=$(echo "$datetime" | sed 's/:/-/g' | sed 's/ /_/' | sed 's/:/-/g')
+                  if [ -z "$filename_base" ] || [ "$filename_base" = "__" ]; then
+                    filename_base=$(date "+%Y-%m-%d_%H-%M-%S")
+                  fi
+
+                  rand_suffix=$(cat /dev/urandom | tr -dc 'a-z0-9' | fold -w 4 | head -n 1)
+                  new_name="${filename_base}_${rand_suffix}.$ext_lower"
+
+                  cp "$img" "${dir}processed/$new_name"
+                fi
+              done
+
+              rm -f "${dir}"*.*
+              if [ "$(ls -A "${dir}processed")" ]; then
+                mv "${dir}processed/"* "${dir}"
+              fi
+              rmdir "${dir}processed"
+
+              # 生成されるJSONファイル名を images/secret_list.json ではなく secret_list.json のようにすっきりさせる
+              find "$dir" -maxdepth 1 -type f \( -name "*.jpg" -o -name "*.jpeg" -o -name "*.png" -o -name "*.webp" \) -printf "images/$folder_name/%P\n" | sort | jq -R -s 'split("\n")[:-1]' > "json/${folder_name}_list.json"
+              
+              echo "Generated: json/${folder_name}_list.json"
+            fi
+          done
+
+      - name: Commit and push changes
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Auto-rename images and update JSON lists"
+          file_pattern: "images/** json/**"
